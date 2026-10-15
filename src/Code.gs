@@ -29,6 +29,8 @@ function doGet(e) {
       .setTitle('RSVP Dashboard')
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
+  if (page === 'ics') return icsOutput_();
+
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('Wedding RSVP')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -68,6 +70,34 @@ function generateIds() {
   range.setValues(rows);
 }
 
+/* ---------- Calendar file (.ics) ---------- */
+// Keep in sync with CONFIG in Index.html. 2:00 PM Philippine time (UTC+8) = 06:00Z; the 4-hour end time is an assumption.
+const EVENT = {
+  title: "Emman & Kath's Wedding",
+  startUtc: '20261128T060000Z',
+  endUtc: '20261128T120000Z',
+  ceremony: 'Our Lady of Lourdes Parish, Tagaytay, Cavite',   // 'Church name, address'  (used as the calendar location)
+  reception: 'Joselito\'s Resort and Events Place, Amadeo, Cavite'    // 'Venue name, address'   (added to the calendar description)
+};
+
+function icsOutput_() {
+  const esc = s => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Emman and Kath//RSVP//EN', 'CALSCALE:GREGORIAN',
+    'BEGIN:VEVENT',
+    'UID:emman-kath-wedding-2026@rsvp',
+    'DTSTAMP:' + Utilities.formatDate(new Date(), 'UTC', "yyyyMMdd'T'HHmmss'Z'"),
+    'DTSTART:' + EVENT.startUtc,
+    'DTEND:' + EVENT.endUtc,
+    'SUMMARY:' + esc(EVENT.title)
+  ];
+  if (EVENT.ceremony) lines.push('LOCATION:' + esc(EVENT.ceremony));
+  const desc = EVENT.title + (EVENT.reception ? '\nReception: ' + EVENT.reception : '');
+  lines.push('DESCRIPTION:' + esc(desc));
+  lines.push('END:VEVENT', 'END:VCALENDAR');
+  return ContentService.createTextOutput(lines.join('\r\n')).setMimeType(ContentService.MimeType.ICAL);
+}
+
 /* ---------- Guest API ---------- */
 
 /** Name search. Returns at most 5 {id, name}; nothing else about the guest is exposed. */
@@ -105,21 +135,23 @@ function getGuest(id) {
   const found = findRow_(id);
   if (!found) return null;
   const g = found.obj;
-  const reserved = Math.max(1, Number(g['Seats Reserved']) || 1);
+  const reserved = Math.max(1, Number(g['Seats Reserved']) || 1); // includes the primary invitee
+  const primary = String(g['Name']).trim();
 
-  let party = splitNames_(g['Party Names']);
-  if (!party.length) party = [String(g['Name'])];
+  // Seat 1 is always the primary invitee, whether or not Party Names lists them
+  const party = splitNames_(g['Party Names']);
+  if (!party.some(n => norm_(n) === norm_(primary))) party.unshift(primary);
   const att = splitNames_(g['Attending']);
   const notAtt = splitNames_(g['Not Attending']);
 
   const members = party.slice(0, reserved).map(n => ({
     name: n,
-    attending: att.includes(n) ? true : notAtt.includes(n) ? false : null
+    attending: att.includes(n) ? true : notAtt.includes(n) ? false : null // null = not answered yet
   }));
   while (members.length < reserved) members.push({ name: '', attending: null });
 
   return {
-    name: g['Name'],
+    name: primary,
     seatsReserved: reserved,
     status: g['Status'] || STATUS.PENDING,
     remarks: g['Remarks'] || '',
@@ -128,9 +160,9 @@ function getGuest(id) {
 }
 
 /**
- * payload = { status: 'Attending' | 'Declined', members: [{name, attending}], remarks }
- * - Declined: everyone on the invitation is recorded as Not Attending
- * - Attending: each named seat is Attending or Not Attending; blank-name seats are ignored
+ * payload = { members: [{name, attending: true|false}], remarks }
+ * Every named seat needs an explicit answer; blank-name seats are ignored.
+ * Status is derived: at least one attending -> Attending, otherwise Declined.
  */
 function submitRsvp(id, payload) {
   const lock = LockService.getScriptLock();
@@ -138,35 +170,24 @@ function submitRsvp(id, payload) {
   try {
     const found = findRow_(id);
     if (!found) throw new Error('Guest not found.');
-    const g = found.obj;
-    const reserved = Math.max(1, Number(g['Seats Reserved']) || 1);
-    const remarks = cleanText_(payload.remarks, 500);
+    const reserved = Math.max(1, Number(found.obj['Seats Reserved']) || 1);
 
-    let party, attending, notAttending;
-
-    if (payload.status === STATUS.DECLINED) {
-      party = splitNames_(g['Party Names']);
-      if (!party.length) party = [String(g['Name'])];
-      attending = [];
-      notAttending = party;
-    } else if (payload.status === STATUS.ATTENDING) {
-      const members = (payload.members || []).slice(0, reserved)
-        .map(m => ({ name: cleanText_(m.name, 80).replace(/;/g, ' '), attending: !!m.attending }))
-        .filter(m => m.name);
-      if (!members.length) throw new Error('Please enter at least one name.');
-      attending = members.filter(m => m.attending).map(m => m.name);
-      notAttending = members.filter(m => !m.attending).map(m => m.name);
-      if (!attending.length) throw new Error('Mark at least one person as attending, or choose "Regretfully decline".');
-      party = members.map(m => m.name);
-    } else {
-      throw new Error('Invalid status.');
+    const raw = (payload.members || []).slice(0, reserved)
+      .map(m => ({ name: cleanText_(m.name, 80).replace(/;/g, ' '), attending: m.attending }))
+      .filter(m => m.name);
+    if (!raw.length) throw new Error('Please enter at least one name.');
+    if (raw.some(m => m.attending !== true && m.attending !== false)) {
+      throw new Error('Please choose Attending or Not Attending for every guest.');
     }
 
+    const attending = raw.filter(m => m.attending).map(m => m.name);
+    const notAttending = raw.filter(m => !m.attending).map(m => m.name);
     const status = attending.length ? STATUS.ATTENDING : STATUS.DECLINED;
-    const start = col_('Party Names');
-    // Party Names, Status, Seats Confirmed, Attending, Not Attending, Remarks, Responded At (contiguous)
-    getSheet_().getRange(found.row, start, 1, 7).setValues([[
-      party.join('; '), status, attending.length,
+    const remarks = cleanText_(payload.remarks, 500);
+
+    // Party Names, Status, Seats Confirmed, Attending, Not Attending, Remarks, Responded At (contiguous columns)
+    getSheet_().getRange(found.row, col_('Party Names'), 1, 7).setValues([[
+      raw.map(m => m.name).join('; '), status, attending.length,
       attending.join('; '), notAttending.join('; '), remarks, new Date()
     ]]);
     return { ok: true, status: status, attending: attending.length };
