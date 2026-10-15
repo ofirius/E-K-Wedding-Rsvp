@@ -1,18 +1,25 @@
 /**
- * Smart RSVP – Google Apps Script skeleton (v3)
+ * Smart RSVP – Google Apps Script (v4: one row per person, grouped into households)
  * Single deployment: Execute as: Me, Access: Anyone.
  *
- * Sheet "Guests" columns (one row per invitation / household):
- * ID | Name | Seats Reserved | Party Names | Status | Seats Confirmed | Attending | Not Attending | Remarks | Responded At
+ * Sheet "Guests" columns (ONE ROW PER PERSON):
+ * ID | Household | Name | Status | Remarks | Responded At | Updated By
  *
- * - Party Names: optional, you pre-fill the names for the reserved seats, separated by ";"
- *   e.g. "Maria Santos; Jose Santos; Baby Ana". Guests can fix typos and fill empty seats.
- * - Attending / Not Attending: filled by the app, names separated by ";"
+ * - Household: any label shared by everyone in the same family/party, e.g. "Santos Family".
+ *   Rows with the same Household are shown together, and anyone in it can update everyone's answer.
+ *   Leave it blank for a person invited on their own.
+ * - Name: the person. Leave Name BLANK (but fill Household) to reserve an open seat that the
+ *   household can name themselves.
+ * - Seats reserved for a household = number of its rows (named people + open seats).
+ * - Status: Pending / Attending / Declined (per person, maintained by the app).
+ * - Remarks: one household message, stored on the household's FIRST row.
+ * - Responded At / Updated By: who last changed that person's answer, filled by the app.
+ * - ID: filled automatically (leave blank).
  */
 
 const SHEET_NAME = 'Guests';
-const HEADERS = ['ID', 'Name', 'Seats Reserved', 'Party Names', 'Status', 'Seats Confirmed',
-                 'Attending', 'Not Attending', 'Remarks', 'Responded At'];
+const OLD_SHEET_NAME = 'Guests (old layout)';
+const HEADERS = ['ID', 'Household', 'Name', 'Status', 'Remarks', 'Responded At', 'Updated By'];
 const STATUS = { PENDING: 'Pending', ATTENDING: 'Attending', DECLINED: 'Declined' };
 const MAX_SEARCH_RESULTS = 5;
 const MIN_QUERY_LENGTH = 3;
@@ -40,14 +47,87 @@ function doGet(e) {
 
 function setup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (sheet && isOldLayout_(sheet)) {
+    throw new Error('Your "Guests" sheet still uses the old one-row-per-household layout. Run migrateToPersonRows() instead of setup().');
+  }
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+  initSheet_(sheet);
+  ensureDashboardKey_();
+}
+
+/** Optional: fill in IDs + default status for rows you added by hand. (The app also does this lazily.) */
+function generateIds() {
+  const sheet = getSheet_();
+  readRows_().forEach(r => {
+    if (!r.ID) sheet.getRange(r.row, 1).setValue(newId_());
+    if (r.Name && !r.Status) sheet.getRange(r.row, col_('Status')).setValue(STATUS.PENDING);
+  });
+}
+
+/**
+ * One-time conversion from the old layout
+ *   ID | Name | Seats Reserved | Party Names | Status | Seats Confirmed | Attending | Not Attending | Remarks | Responded At
+ * to one row per person. The old sheet is kept, renamed "Guests (old layout)".
+ */
+function migrateToPersonRows() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const old = ss.getSheetByName(SHEET_NAME);
+  if (!old || !isOldLayout_(old)) throw new Error('No old-layout "Guests" sheet found, nothing to migrate.');
+
+  const OLD = ['ID', 'Name', 'Seats Reserved', 'Party Names', 'Status', 'Seats Confirmed',
+               'Attending', 'Not Attending', 'Remarks', 'Responded At'];
+  const last = old.getLastRow();
+  const values = last >= 2 ? old.getRange(2, 1, last - 1, OLD.length).getValues() : [];
+  const out = [];
+  const usedLabels = new Set();
+
+  values.forEach(v => {
+    const o = Object.fromEntries(OLD.map((h, i) => [h, v[i]]));
+    const primary = String(o['Name'] || '').trim();
+    if (!primary) return;
+
+    let label = primary, n = 2;
+    while (usedLabels.has(norm_(label))) label = primary + ' (' + (n++) + ')';
+    usedLabels.add(norm_(label));
+
+    const reserved = Math.max(1, Number(o['Seats Reserved']) || 1);
+    const party = splitNames_(o['Party Names']);
+    if (!party.some(x => norm_(x) === norm_(primary))) party.unshift(primary);
+    const names = party.slice(0, reserved);
+    const att = splitNames_(o['Attending']).map(norm_);
+    const notAtt = splitNames_(o['Not Attending']).map(norm_);
+
+    names.forEach((nm, i) => {
+      const k = norm_(nm);
+      const status = att.includes(k) ? STATUS.ATTENDING : notAtt.includes(k) ? STATUS.DECLINED : STATUS.PENDING;
+      const answered = status !== STATUS.PENDING;
+      out.push([newId_(), label, nm, status, i === 0 ? String(o['Remarks'] || '') : '',
+                answered ? o['Responded At'] : '', answered ? primary : '']);
+    });
+    for (let i = names.length; i < reserved; i++) out.push([newId_(), label, '', '', '', '', '']); // open seats
+  });
+
+  let backupName = OLD_SHEET_NAME;
+  if (ss.getSheetByName(backupName)) backupName += ' ' + Utilities.formatDate(new Date(), 'UTC', 'yyyyMMdd-HHmmss');
+  old.setName(backupName);
+
+  const sheet = ss.insertSheet(SHEET_NAME);
+  initSheet_(sheet);
+  if (out.length) sheet.getRange(2, 1, out.length, HEADERS.length).setValues(out);
+  ensureDashboardKey_();
+  Logger.log('Migrated ' + out.length + ' rows. Old sheet kept as "' + backupName + '".');
+}
+
+function initSheet_(sheet) {
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
   sheet.setFrozenRows(1);
-
   const rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(Object.values(STATUS), true).build();
   sheet.getRange(2, col_('Status'), 1000, 1).setDataValidation(rule);
+}
 
+function ensureDashboardKey_() {
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('DASHBOARD_KEY')) {
     props.setProperty('DASHBOARD_KEY', Utilities.getUuid().replace(/-/g, '').slice(0, 12));
@@ -55,19 +135,9 @@ function setup() {
   Logger.log('Dashboard key: ' + props.getProperty('DASHBOARD_KEY'));
 }
 
-/** Optional: fill in IDs + default status for rows you added. (Search also assigns IDs lazily.) */
-function generateIds() {
-  const sheet = getSheet_();
-  const last = sheet.getLastRow();
-  if (last < 2) return;
-  const range = sheet.getRange(2, 1, last - 1, HEADERS.length);
-  const rows = range.getValues();
-  const iID = HEADERS.indexOf('ID'), iName = HEADERS.indexOf('Name'), iStatus = HEADERS.indexOf('Status');
-  rows.forEach(r => {
-    if (r[iName] && !r[iID]) r[iID] = newId_();
-    if (r[iName] && !r[iStatus]) r[iStatus] = STATUS.PENDING;
-  });
-  range.setValues(rows);
+function isOldLayout_(sheet) {
+  if (sheet.getLastColumn() < 1) return false;
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String).includes('Party Names');
 }
 
 /* ---------- Calendar file (.ics) ---------- */
@@ -100,97 +170,110 @@ function icsOutput_() {
 
 /* ---------- Guest API ---------- */
 
-/** Name search. Returns at most 5 {id, name}; nothing else about the guest is exposed. */
+/** Name search over individual people. Returns at most 5 {id, name, hint}; nothing else about the guest is exposed. */
 function searchGuests(query) {
   const q = norm_(query);
   if (q.replace(/ /g, '').length < MIN_QUERY_LENGTH) return [];
   rateLimit_();
 
-  const sheet = getSheet_();
-  const last = sheet.getLastRow();
-  if (last < 2) return [];
-  const values = sheet.getRange(2, 1, last - 1, HEADERS.length).getValues();
-  const iID = HEADERS.indexOf('ID'), iName = HEADERS.indexOf('Name'), iParty = HEADERS.indexOf('Party Names');
   const tokens = q.split(' ');
-  const out = [];
+  const hits = readRows_()
+    .filter(r => r.Name && tokens.every(t => norm_(r.Name).includes(t)))
+    .slice(0, MAX_SEARCH_RESULTS);
+  if (!hits.length) return [];
+  ensureIds_(hits);
 
-  for (let i = 0; i < values.length && out.length < MAX_SEARCH_RESULTS; i++) {
-    const name = values[i][iName];
-    if (!name) continue;
-    // match on the invitee name OR any pre-filled party member, so "Jose" finds the Santos household
-    const haystack = norm_(name + ' ' + String(values[i][iParty] || '').replace(/;/g, ' '));
-    if (tokens.every(t => haystack.includes(t))) {
-      let id = values[i][iID];
-      if (!id) {
-        id = newId_();
-        sheet.getRange(i + 2, 1).setValue(id);
-      }
-      out.push({ id: String(id), name: String(name) });
-    }
-  }
-  return out;
+  // if two people share a name, show their household label so they can tell them apart
+  const counts = {};
+  hits.forEach(r => { const k = norm_(r.Name); counts[k] = (counts[k] || 0) + 1; });
+  return hits.map(r => ({ id: r.ID, name: r.Name, hint: counts[norm_(r.Name)] > 1 ? r.Household : '' }));
 }
 
-function getGuest(id) {
-  const found = findRow_(id);
-  if (!found) return null;
-  const g = found.obj;
-  const reserved = Math.max(1, Number(g['Seats Reserved']) || 1); // includes the primary invitee
-  const primary = String(g['Name']).trim();
+/** Everyone in the searcher's household with their current answers. The searcher is listed first. */
+function getHousehold(id) {
+  const rows = readRows_();
+  const me = rows.find(r => r.ID && r.ID === String(id || '').trim());
+  if (!me || !me.Name) return null;
 
-  // Seat 1 is always the primary invitee, whether or not Party Names lists them
-  const party = splitNames_(g['Party Names']);
-  if (!party.some(n => norm_(n) === norm_(primary))) party.unshift(primary);
-  const att = splitNames_(g['Attending']);
-  const notAtt = splitNames_(g['Not Attending']);
+  const mates = rows.filter(r => groupKey_(r) === groupKey_(me)); // sheet order
+  ensureIds_(mates);
+  const ordered = [me].concat(mates.filter(r => r !== me));
 
-  const members = party.slice(0, reserved).map(n => ({
-    name: n,
-    attending: att.includes(n) ? true : notAtt.includes(n) ? false : null // null = not answered yet
-  }));
-  while (members.length < reserved) members.push({ name: '', attending: null });
+  let latest = null;
+  mates.forEach(r => {
+    if (!r['Responded At']) return;
+    const d = new Date(r['Responded At']);
+    if (!isNaN(d) && (!latest || d > latest.d)) latest = { d: d, by: String(r['Updated By'] || '') };
+  });
 
   return {
-    name: primary,
-    seatsReserved: reserved,
-    status: g['Status'] || STATUS.PENDING,
-    remarks: g['Remarks'] || '',
-    members: members
+    name: me.Name,
+    household: me.Household,
+    seatsReserved: mates.length,                      // named people + open seats, includes the searcher
+    remarks: String(mates[0].Remarks || ''),
+    lastUpdate: latest
+      ? { by: latest.by, at: Utilities.formatDate(latest.d, Session.getScriptTimeZone(), 'MMM d, h:mm a') }
+      : null,
+    members: ordered.map(r => ({
+      id: r.ID,
+      name: r.Name,                                   // '' = open seat
+      isMe: r === me,
+      attending: statusOf_(r) === STATUS.ATTENDING ? true : statusOf_(r) === STATUS.DECLINED ? false : null
+    }))
   };
 }
 
 /**
- * payload = { members: [{name, attending: true|false}], remarks }
- * Every named seat needs an explicit answer; blank-name seats are ignored.
- * Status is derived: at least one attending -> Attending, otherwise Declined.
+ * payload = { members: [{id, name, attending: true|false}], remarks }
+ * Anyone in the household can save answers for everyone in it. Only rows whose answer actually changed
+ * get a new Responded At / Updated By, so "last updated by" stays truthful.
+ * Open seats (blank Name in the sheet) are named from payload.members[].name.
  */
 function submitRsvp(id, payload) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const found = findRow_(id);
-    if (!found) throw new Error('Guest not found.');
-    const reserved = Math.max(1, Number(found.obj['Seats Reserved']) || 1);
+    const rows = readRows_();
+    const me = rows.find(r => r.ID && r.ID === String(id || '').trim());
+    if (!me || !me.Name) throw new Error('Guest not found.');
+    const mates = rows.filter(r => groupKey_(r) === groupKey_(me));
+    const byId = new Map(mates.map(r => [r.ID, r]));
 
-    const raw = (payload.members || []).slice(0, reserved)
-      .map(m => ({ name: cleanText_(m.name, 80).replace(/;/g, ' '), attending: m.attending }))
-      .filter(m => m.name);
-    if (!raw.length) throw new Error('Please enter at least one name.');
-    if (raw.some(m => m.attending !== true && m.attending !== false)) {
-      throw new Error('Please choose Attending or Not Attending for every guest.');
+    const entries = [];
+    (payload.members || []).forEach(m => {
+      const r = byId.get(String((m && m.id) || '').trim());
+      if (!r) return;                                                   // ignore anything outside this household
+      const name = r.Name || cleanText_(m.name, 80).replace(/;/g, ' '); // open seats can be named by the guest
+      if (!name) return;
+      if (m.attending !== true && m.attending !== false) {
+        throw new Error('Please choose Attending or Not Attending for every guest.');
+      }
+      entries.push({ r: r, name: name, status: m.attending ? STATUS.ATTENDING : STATUS.DECLINED });
+    });
+    if (!entries.length) throw new Error('Please enter at least one name.');
+    if (mates.some(r => r.Name && !entries.some(e => e.r === r))) {
+      throw new Error('Please answer for everyone in the invitation.');
     }
 
-    const attending = raw.filter(m => m.attending).map(m => m.name);
-    const notAttending = raw.filter(m => !m.attending).map(m => m.name);
-    const status = attending.length ? STATUS.ATTENDING : STATUS.DECLINED;
+    const sheet = getSheet_();
     const remarks = cleanText_(payload.remarks, 500);
+    const first = mates[0];
+    const now = new Date();
+    let firstTouched = false;
 
-    // Party Names, Status, Seats Confirmed, Attending, Not Attending, Remarks, Responded At (contiguous columns)
-    getSheet_().getRange(found.row, col_('Party Names'), 1, 7).setValues([[
-      raw.map(m => m.name).join('; '), status, attending.length,
-      attending.join('; '), notAttending.join('; '), remarks, new Date()
-    ]]);
-    return { ok: true, status: status, attending: attending.length };
+    entries.forEach(e => {
+      const changed = statusOf_(e.r) !== e.status || e.r.Name !== e.name;
+      if (!changed) return;
+      if (e.r === first) firstTouched = true;
+      // Name, Status, Remarks, Responded At, Updated By (contiguous)
+      sheet.getRange(e.r.row, col_('Name'), 1, 5).setValues([[
+        e.name, e.status, e.r === first ? remarks : e.r.Remarks, now, me.Name
+      ]]);
+    });
+    if (!firstTouched && remarks !== String(first.Remarks || '')) {
+      sheet.getRange(first.row, col_('Remarks')).setValue(remarks);
+    }
+    return { ok: true, attending: entries.filter(e => e.status === STATUS.ATTENDING).length };
   } finally {
     lock.releaseLock();
   }
@@ -202,38 +285,55 @@ function getDashboardData(key) {
   const expected = PropertiesService.getScriptProperties().getProperty('DASHBOARD_KEY');
   if (!key || key !== expected) throw new Error('Unauthorized.');
 
-  const guests = readAll_().filter(g => g['Name']);
-  const sum = (arr, f) => arr.reduce((t, g) => t + (Number(g[f]) || 0), 0);
+  const groups = new Map();
+  readRows_().forEach(r => {
+    const k = groupKey_(r);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  });
 
-  const attending = guests.filter(g => g['Status'] === STATUS.ATTENDING);
-  const declined = guests.filter(g => g['Status'] === STATUS.DECLINED);
-  const pending = guests.filter(g => !g['Status'] || g['Status'] === STATUS.PENDING);
-  const responded = attending.concat(declined);
+  const totals = { households: 0, invitees: 0, attending: 0, declined: 0, pending: 0, seatsReserved: 0, openSeats: 0 };
+  const households = [];
+  const fmt = d => Utilities.formatDate(d, Session.getScriptTimeZone(), 'MMM d, h:mm a');
 
-  return {
-    totals: {
-      invitations: guests.length,
-      attending: attending.length,
-      declined: declined.length,
-      pending: pending.length,
-      seatsReserved: sum(guests, 'Seats Reserved'),
-      seatsConfirmed: sum(attending, 'Seats Confirmed'),
-      seatsPending: sum(pending, 'Seats Reserved'),
-      seatsReleased: sum(responded, 'Seats Reserved') - sum(responded, 'Seats Confirmed')
-    },
-    guests: guests.map(g => ({
-      name: g['Name'],
-      status: g['Status'] || STATUS.PENDING,
-      seatsReserved: g['Seats Reserved'],
-      seatsConfirmed: g['Seats Confirmed'],
-      attending: g['Attending'],
-      notAttending: g['Not Attending'],
-      remarks: g['Remarks'],
-      respondedAt: g['Responded At']
-        ? Utilities.formatDate(new Date(g['Responded At']), Session.getScriptTimeZone(), 'MMM d, h:mm a')
-        : ''
-    }))
-  };
+  groups.forEach(list => {
+    const named = list.filter(r => r.Name);
+    if (!named.length) return;                          // a household with only open seats and nobody named yet
+    const yes = named.filter(r => statusOf_(r) === STATUS.ATTENDING).map(r => r.Name);
+    const no = named.filter(r => statusOf_(r) === STATUS.DECLINED).map(r => r.Name);
+    const wait = named.filter(r => statusOf_(r) === STATUS.PENDING).map(r => r.Name);
+    const open = list.length - named.length;
+
+    totals.households++;
+    totals.invitees += named.length;
+    totals.attending += yes.length;
+    totals.declined += no.length;
+    totals.pending += wait.length;
+    totals.seatsReserved += list.length;
+    totals.openSeats += open;
+
+    let latest = null;
+    list.forEach(r => {
+      if (!r['Responded At']) return;
+      const d = new Date(r['Responded At']);
+      if (!isNaN(d) && (!latest || d > latest.d)) latest = { d: d, by: String(r['Updated By'] || '') };
+    });
+
+    households.push({
+      label: list[0].Household || named[0].Name,
+      status: !wait.length ? (yes.length ? 'Attending' : 'Declined') : (yes.length || no.length ? 'Partial' : 'Pending'),
+      seats: list.length,
+      openSeats: open,
+      attending: yes,
+      notAttending: no,
+      pending: wait,
+      remarks: String(list[0].Remarks || ''),
+      updatedBy: latest ? latest.by : '',
+      respondedAt: latest ? fmt(latest.d) : ''
+    });
+  });
+
+  return { totals: totals, households: households };
 }
 
 /* ---------- Helpers ---------- */
@@ -243,26 +343,55 @@ function col_(header) { return HEADERS.indexOf(header) + 1; }
 function getSheet_() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) throw new Error('Run setup() first.');
+  if (isOldLayout_(sheet)) throw new Error('The Guests sheet uses the old layout. Run migrateToPersonRows() once.');
   return sheet;
 }
 
-function readAll_() {
+/** Every non-empty row as an object, plus .row (sheet row number). Rows with neither Name nor Household are skipped. */
+function readRows_() {
   const sheet = getSheet_();
   const last = sheet.getLastRow();
   if (last < 2) return [];
   const values = sheet.getRange(2, 1, last - 1, HEADERS.length).getValues();
-  return values.map(r => Object.fromEntries(HEADERS.map((h, i) => [h, r[i]])));
+  const rows = [];
+  values.forEach((v, i) => {
+    const o = Object.fromEntries(HEADERS.map((h, j) => [h, v[j]]));
+    o.row = i + 2;
+    o.ID = String(o.ID || '').trim();
+    o.Household = String(o.Household || '').trim();
+    o.Name = String(o.Name || '').trim();
+    if (!o.Name && !o.Household) return;
+    rows.push(o);
+  });
+  return rows;
 }
 
-function findRow_(id) {
-  if (!id) return null;
-  const sheet = getSheet_();
-  const last = sheet.getLastRow();
-  if (last < 2) return null;
-  const values = sheet.getRange(2, 1, last - 1, HEADERS.length).getValues();
-  const idx = values.findIndex(r => String(r[0]).trim() === String(id).trim());
-  if (idx === -1) return null;
-  return { row: idx + 2, obj: Object.fromEntries(HEADERS.map((h, i) => [h, values[idx][i]])) };
+/** Rows sharing a Household label form one household; a row with no Household is its own household. */
+function groupKey_(r) { return r.Household ? 'h:' + norm_(r.Household) : 'r:' + r.row; }
+
+function statusOf_(r) {
+  const s = String(r.Status || '').trim();
+  return s === STATUS.ATTENDING || s === STATUS.DECLINED ? s : STATUS.PENDING;
+}
+
+/** Give any row without an ID one. Re-checks the cell under a lock so two guests can't assign different IDs. */
+function ensureIds_(rows) {
+  const missing = rows.filter(r => !r.ID);
+  if (!missing.length) return;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = getSheet_();
+    missing.forEach(r => {
+      const cell = sheet.getRange(r.row, 1);
+      const cur = String(cell.getValue() || '').trim();
+      if (cur) { r.ID = cur; return; }
+      r.ID = newId_();
+      cell.setValue(r.ID);
+    });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function newId_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 10); }

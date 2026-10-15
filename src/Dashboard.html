@@ -16,8 +16,10 @@
     table { border-collapse: collapse; width: 100%; font-size: 14px; }
     th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #eee; vertical-align: top; }
     th { background: #f3eee6; white-space: nowrap; }
-    .pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
-    .Attending { background: #d9f2df; } .Declined { background: #f8d9d9; } .Pending { background: #fdf0c8; }
+    .pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+    .Attending { background: #d9f2df; } .Declined { background: #f8d9d9; } .Pending { background: #fdf0c8; } .Partial { background: #dfe8f7; }
+    .names div { padding: 1px 0; }
+    .muted { color: #888; font-size: 12px; }
     .error { color: #b00020; }
   </style>
 </head>
@@ -30,14 +32,15 @@
     <button class="active" data-f="All">All</button>
     <button data-f="Attending">Attending</button>
     <button data-f="Declined">Declined</button>
+    <button data-f="Partial">Partly answered</button>
     <button data-f="Pending">Pending</button>
-    <input id="search" placeholder="Search name…">
+    <input id="search" placeholder="Search household or name…">
     <button onclick="load()">Refresh</button>
   </div>
 
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Invitee</th><th>Status</th><th>Reserved</th><th>Confirmed</th><th>Attending</th><th>Not attending</th><th>Remarks</th><th>Responded</th></tr></thead>
+      <thead><tr><th>Household</th><th>Status</th><th>Seats</th><th>Attending</th><th>Not attending</th><th>Awaiting</th><th>Remarks</th><th>Last update</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -57,22 +60,25 @@
     function draw() {
       const t = data.totals;
       const cards = [
-        [t.invitations, 'Invitations'], [t.attending, 'Attending'], [t.declined, 'Declined'], [t.pending, 'Awaiting response'],
-        [t.seatsConfirmed, 'Guests confirmed'], [t.seatsPending, 'Seats still pending'],
-        [t.seatsReleased, 'Seats released'], [t.seatsReserved, 'Seats reserved total']
+        [t.households, 'Households'], [t.invitees, 'Invited people'],
+        [t.attending, 'Attending'], [t.declined, 'Not attending'], [t.pending, 'Awaiting response'],
+        [t.seatsReserved, 'Seats reserved'], [t.openSeats, 'Seats not yet named']
       ];
       $('stats').innerHTML = cards.map(c => `<div class="stat"><div class="n">${c[0]}</div><div class="l">${c[1]}</div></div>`).join('');
 
       const q = $('search').value.toLowerCase();
-      const list = data.guests.filter(g =>
-        (filter === 'All' || g.status === filter) &&
-        (g.name + ' ' + g.attending + ' ' + g.notAttending).toLowerCase().includes(q));
-      $('rows').innerHTML = list.map(g => `<tr>
-        <td>${esc(g.name)}</td>
-        <td><span class="pill ${g.status}">${g.status}</span></td>
-        <td>${g.seatsReserved ?? ''}</td><td>${g.seatsConfirmed ?? ''}</td>
-        <td>${esc(g.attending || '')}</td><td>${esc(g.notAttending || '')}</td>
-        <td>${esc(g.remarks || '')}</td><td>${g.respondedAt}</td></tr>`).join('');
+      const list = data.households.filter(h =>
+        (filter === 'All' || h.status === filter) &&
+        [h.label].concat(h.attending, h.notAttending, h.pending).join(' ').toLowerCase().includes(q));
+
+      const names = arr => arr.length ? `<div class="names">${arr.map(n => `<div>${esc(n)}</div>`).join('')}</div>` : '';
+      $('rows').innerHTML = list.map(h => `<tr>
+        <td>${esc(h.label)}</td>
+        <td><span class="pill ${h.status}">${h.status === 'Partial' ? 'Partly answered' : h.status}</span></td>
+        <td>${h.seats}${h.openSeats ? `<div class="muted">${h.openSeats} not named</div>` : ''}</td>
+        <td>${names(h.attending)}</td><td>${names(h.notAttending)}</td><td>${names(h.pending)}</td>
+        <td>${esc(h.remarks)}</td>
+        <td>${esc(h.respondedAt)}${h.updatedBy ? `<div class="muted">by ${esc(h.updatedBy)}</div>` : ''}</td></tr>`).join('');
     }
 
     function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }

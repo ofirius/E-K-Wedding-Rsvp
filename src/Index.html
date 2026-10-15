@@ -141,6 +141,8 @@
     .vaddr { margin-top: 2px; font-size: 14px; }
     .maplink { display: inline-block; margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--brown); text-decoration: none; }
     .note-line { margin-top: 8px; font-size: 14px; }
+    .you { margin-left: 8px; padding: 2px 8px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--brown); background: var(--panel); border-radius: 999px; vertical-align: middle; }
+    .updated { margin: 0 2px 12px; font-size: 13px; color: var(--muted); }
     .important { margin-top: 18px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
     .important h3 { margin: 8px 0 6px; font-size: 20px; }
     .important p { margin: 0 0 8px; font-size: 15px; line-height: 1.45; color: var(--muted); }
@@ -202,6 +204,8 @@
         </div>
         <span id="progress" class="pill">0 of 0 answered</span>
       </div>
+
+      <p id="updatedLine" class="updated hidden"></p>
 
       <div class="quick">
         <button id="allYes">Everyone's attending</button>
@@ -344,7 +348,9 @@
       $('searchMsg').textContent = '';
       list.forEach(g => {
         const b = el('button', 'result');
-        b.append(el('span', '', g.name), el('span', 'go', '\u203A')); // textContent only, so names can't inject HTML
+        const label = el('span', '', g.name); // textContent only, so names can't inject HTML
+        if (g.hint) label.appendChild(el('small', 'muted', '  (' + g.hint + ')'));
+        b.append(label, el('span', 'go', '\u203A'));
         b.onclick = () => pick(g.id);
         $('results').appendChild(b);
       });
@@ -358,7 +364,7 @@
           guestId = id; guest = g; render();
         })
         .withFailureHandler(e => { $('searchMsg').textContent = e.message; })
-        .getGuest(id);
+        .getHousehold(id);
     }
 
     function backToSearch() {
@@ -371,6 +377,8 @@
     /* ---------- reservation + guest answers ---------- */
     function render() {
       members = guest.members.map(m => ({
+        id: m.id,
+        isMe: !!m.isMe,
         name: m.name,
         fixed: !!m.name,
         attending: m.attending === true ? true : m.attending === false ? false : null
@@ -379,6 +387,10 @@
       $('guestName').textContent = guest.name + (CONFIG.familySuffix && n > 1 ? ' & Family' : '');
       $('seatsLine').textContent = 'We have reserved ' + n + (n > 1 ? ' seats' : ' seat') + ' in your honor.';
       $('seatsNum').textContent = n;
+      $('updatedLine').textContent = guest.lastUpdate
+        ? 'Last updated' + (guest.lastUpdate.by ? ' by ' + guest.lastUpdate.by : '') + ' \u00B7 ' + guest.lastUpdate.at
+        : '';
+      $('updatedLine').classList.toggle('hidden', !guest.lastUpdate);
       $('remarks').value = guest.remarks || '';
       $('error').textContent = '';
       drawParty();
@@ -395,7 +407,9 @@
         const state = el('div', 'gstate');
 
         if (m.fixed) {
-          info.append(el('div', 'gname', m.name), state);
+          const nm = el('div', 'gname', m.name);
+          if (m.isMe) nm.appendChild(el('span', 'you', 'You'));
+          info.append(nm, state);
         } else {
           const input = el('input');
           input.placeholder = 'Add a guest name (optional)';
@@ -507,7 +521,7 @@
           $('reviewError').textContent = e.message;
         })
         .submitRsvp(guestId, {
-          members: named.map(m => ({ name: m.name.trim(), attending: m.attending })),
+          members: named.map(m => ({ id: m.id, name: m.name.trim(), attending: m.attending })),
           remarks: $('remarks').value
         });
     };
