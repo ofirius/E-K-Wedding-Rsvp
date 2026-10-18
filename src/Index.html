@@ -129,6 +129,7 @@
     .table .th + .tr { border-top: 0; }
     .table .tr .mk { flex: none; width: 18px; color: var(--yes); }
     .table .tr .mk.no { color: var(--no); }
+    .names .mk.wait, .table .tr .mk.wait { color: var(--muted); }
     .notebox { margin: 12px 0 0; padding: 13px 14px; background: var(--panel); border-radius: 12px; font-size: 14px; color: var(--muted); line-height: 1.45; }
     .notebox b { color: var(--text); }
     .submitted { margin: 14px 2px 0; font-size: 14px; font-weight: 500; color: var(--muted); }
@@ -180,7 +181,7 @@
         <div class="eyebrow"><span></span>YOU'RE INVITED<span></span></div>
         <h1>Emman &amp; Kath's Wedding</h1>
         <p class="when">Saturday, November 28, 2026 - 2:00 PM</p>
-        <p class="deadline">RSVP by November 20, 2026</p>
+        <p class="deadline">RSVP by November 9, 2026</p>
         <div class="divider"><i></i></div>
       </header>
 
@@ -214,7 +215,7 @@
       <div class="confirm-head">
         <div>
           <h3>Confirm each guest</h3>
-          <p>Choose Attending or Not Attending for every name below.</p>
+          <p>Start with your own answer, then answer for anyone else you can. Anyone you leave unanswered stays pending.</p>
         </div>
         <span id="progress" class="pill">0 of 0 answered</span>
       </div>
@@ -238,7 +239,8 @@
         <textarea id="remarks" class="field" rows="3" maxlength="500"></textarea>
       </div>
 
-      <button id="submitBtn" class="primary" disabled>Please complete your RSVP</button>
+      <button id="submitBtn" class="primary" disabled>Answer for yourself to continue</button>
+      <p id="pendingHint" class="hint hidden"></p>
       <div id="error" class="error"></div>
       <button class="back" onclick="backToSearch()">← Back to Search</button>
     </section>
@@ -264,6 +266,7 @@
         <div id="reviewCount" class="count-bar"></div>
         <div id="rvYesBlock" class="rv-block"><div class="label">Attending</div><ul id="rvYes" class="names"></ul></div>
         <div id="rvNoBlock" class="rv-block"><div class="label">Not attending</div><ul id="rvNo" class="names"></ul></div>
+        <div id="rvWaitBlock" class="rv-block"><div class="label">Awaiting reply</div><ul id="rvWait" class="names"></ul><p class="muted">They stay pending until someone answers for them.</p></div>
         <div id="rvUnusedBlock" class="rv-block"><div class="label">Reserved seats</div><p id="rvUnused"></p></div>
         <div id="rvRemarksBlock" class="rv-block"><div class="label">Your message</div><p id="rvRemarks"></p></div>
         <div class="sendnote">Your RSVP will be sent to <b>Emman &amp; Kath</b>.</div>
@@ -286,6 +289,7 @@
         <h3>Attendance details</h3>
         <div id="doneTable" class="table"></div>
         <p class="notebox">Only guests marked <b>Attending</b> are confirmed in this reservation.</p>
+        <p id="waitNote" class="notebox hidden"></p>
         <p id="submittedAt" class="submitted"></p>
 
         <div class="event">
@@ -325,13 +329,13 @@
       couple: "Emman & Kath",
       eventTitle: "Emman & Kath's Wedding",
       eventLabel: 'Saturday, November 28, 2026 - 2:00 PM',
-      deadline: 'November 20, 2026',
+      deadline: 'November 9, 2026',
       // Calendar block in UTC. 2:00 PM Philippine time (UTC+8) = 06:00Z. The 4-hour end time is an assumption, adjust it.
       startUtc: '20261128T060000Z',
       endUtc: '20261128T120000Z',
       // Fill in name (required to show the block), address and, if different from the wedding time, a time like '4:30 PM'.
       ceremony:  { name: 'Our Lady of Lourdes Parish', address: 'Tagaytay, Cavite', time: '2:00 PM' },   // the church
-      reception: { name: 'Joselito\'s Resort and Events Place', address: 'Amadeo, Cavite', time: '3:30 PM' },
+      reception: { name: 'Joselito\'s Resort and Events Place', address: 'Amadeo, Cavite'},
       arrivalNote: 'Please arrive 15-30 minutes before the ceremony.',    // e.g. 'Please arrive 15-30 minutes before the ceremony.' Leave blank to hide it.
       appUrl: 'https://script.google.com/macros/s/AKfycbxg7lA_qm2pN30_-qD19nwG5dc9VoDGoUvhpPAZl6fsXCaMnXnYQIG_DHcpzOvhCvhLkg/exec',         // paste your web app /exec URL to enable the .ics download link
       familySuffix: false  // shows "NAME & FAMILY" when more than one seat is reserved
@@ -477,19 +481,27 @@
       state.textContent = !named ? 'Optional seat. Add a name to include a guest.'
         : m.attending === true ? 'Attending'
         : m.attending === false ? 'Not attending'
-        : 'Choose an answer.';
+        : 'Not answered yet.';
     }
 
     function namedSeats() { return seats.filter(m => m.name.trim()); }
 
+    const hasAnswer = seat => !!seat && (seat.attending === true || seat.attending === false);
+    const selfSeat = () => seats.find(m => m.isSelf);
+
     function updateProgress() {
       const named = namedSeats();
-      const answered = named.filter(m => m.attending === true || m.attending === false).length;
-      const complete = named.length > 0 && answered === named.length;
+      const answered = named.filter(hasAnswer).length;
+      const waiting = named.length - answered;
+      const canReview = hasAnswer(selfSeat());         // the person filling this in answers for themselves; the rest may stay pending
       $('progress').textContent = answered + ' of ' + named.length + ' answered';
-      $('progress').classList.toggle('done', complete);
-      $('submitBtn').disabled = !complete;
-      $('submitBtn').textContent = complete ? 'Review My RSVP' : 'Please complete your RSVP';
+      $('progress').classList.toggle('done', named.length > 0 && waiting === 0);
+      $('submitBtn').disabled = !canReview;
+      $('submitBtn').textContent = canReview ? 'Review My RSVP' : 'Answer for yourself to continue';
+      $('pendingHint').textContent = canReview
+        ? waiting + (waiting > 1 ? ' guests have' : ' guest has') + " no answer yet. They'll stay pending until someone answers for them."
+        : 'Choose Attending or Not Attending for yourself first. You can leave the others unanswered.';
+      $('pendingHint').classList.toggle('hidden', canReview && waiting === 0);
     }
 
     function answerAll(value) {
@@ -502,30 +514,36 @@
     /* ---------- review -> submit ---------- */
     function collectAnswers() {
       const named = namedSeats();
+      const names = list => list.map(m => m.name.trim());
       return {
         named,
-        yes: named.filter(m => m.attending).map(m => m.name.trim()),
-        no: named.filter(m => !m.attending).map(m => m.name.trim())
+        yes: names(named.filter(m => m.attending === true)),
+        no: names(named.filter(m => m.attending === false)),
+        waiting: names(named.filter(m => m.attending !== true && m.attending !== false))
       };
     }
 
-    const fillNameList = (ul, names, isYes) => {
+    const MARKS = { yes: ['', '\u2713'], no: [' no', '\u25CB'], wait: [' wait', '\u2013'] };
+    const markEl = kind => el('span', 'mk' + MARKS[kind][0], MARKS[kind][1]);
+    const fillNameList = (ul, names, kind) => {
       ul.innerHTML = '';
       names.forEach(n => {
         const li = el('li');
-        li.append(el('span', 'mk' + (isYes ? '' : ' no'), isYes ? '\u2713' : '\u25CB'), el('span', '', n));
+        li.append(markEl(kind), el('span', '', n));
         ul.appendChild(li);
       });
     };
 
     $('submitBtn').onclick = () => {
-      const { named, yes, no } = collectAnswers();
-      if (!named.length || named.some(m => m.attending !== true && m.attending !== false)) { updateProgress(); return; }
-      $('reviewCount').textContent = yes.length + ' of ' + named.length + ' attending';
-      fillNameList($('rvYes'), yes, true);
-      fillNameList($('rvNo'), no, false);
+      const { named, yes, no, waiting } = collectAnswers();
+      if (!hasAnswer(selfSeat())) { updateProgress(); return; }          // the searcher must answer for themselves
+      $('reviewCount').textContent = yes.length + ' of ' + named.length + ' attending' + (waiting.length ? ' \u00B7 ' + waiting.length + ' awaiting' : '');
+      fillNameList($('rvYes'), yes, 'yes');
+      fillNameList($('rvNo'), no, 'no');
+      fillNameList($('rvWait'), waiting, 'wait');
       $('rvYesBlock').classList.toggle('hidden', !yes.length);
       $('rvNoBlock').classList.toggle('hidden', !no.length);
+      $('rvWaitBlock').classList.toggle('hidden', !waiting.length);
       const unused = household.seatsReserved - named.length;
       $('rvUnusedBlock').classList.toggle('hidden', unused <= 0);
       $('rvUnused').textContent = unused + (unused > 1 ? ' reserved seats' : ' reserved seat') + ' not used.';
@@ -538,14 +556,14 @@
     $('editBtn').onclick = () => show('formView');
 
     $('sendBtn').onclick = () => {
-      const { named, yes, no } = collectAnswers();
+      const { named, yes, no, waiting } = collectAnswers();
       const btn = $('sendBtn');
       $('reviewError').textContent = '';
       btn.disabled = true; btn.textContent = 'Sending…';
       google.script.run
         .withSuccessHandler(() => {
           btn.disabled = false; btn.textContent = 'Submit RSVP';
-          lastSubmission = { yes, no, at: new Date() };
+          lastSubmission = { yes, no, waiting, at: new Date() };
           showConfirmation();
         })
         .withFailureHandler(e => {
@@ -566,22 +584,25 @@
     }
 
     function showConfirmation() {
-      const { yes, no, at } = lastSubmission;
-      $('doneBadge').textContent = yes.length + ' attending \u00B7 ' + no.length + ' not attending';
+      const { yes, no, waiting, at } = lastSubmission;
+      $('doneBadge').textContent = yes.length + ' attending \u00B7 ' + no.length + ' not attending' + (waiting.length ? ' \u00B7 ' + waiting.length + ' awaiting' : '');
 
       const t = $('doneTable');
       t.innerHTML = '';
-      const addSection = (label, names, isYes) => {
+      const addSection = (label, names, kind) => {
         if (!names.length) return;
         t.appendChild(el('div', 'th', label));
         names.forEach(n => {
           const r = el('div', 'tr');
-          r.append(el('span', 'mk' + (isYes ? '' : ' no'), isYes ? '\u2713' : '\u25CB'), el('span', '', n));
+          r.append(markEl(kind), el('span', '', n));
           t.appendChild(r);
         });
       };
-      addSection('Attending', yes, true);
-      addSection('Not attending', no, false);
+      addSection('Attending', yes, 'yes');
+      addSection('Not attending', no, 'no');
+      addSection('Awaiting reply', waiting, 'wait');
+      $('waitNote').textContent = waiting.length ? 'Guests awaiting a reply are not confirmed yet. Anyone on this invitation can answer for them before ' + CONFIG.deadline + '.' : '';
+      $('waitNote').classList.toggle('hidden', !waiting.length);
 
       $('submittedAt').textContent = 'Submitted: ' + formatWhen(at);
 
@@ -662,7 +683,7 @@
       centered(household.name + (CONFIG.familySuffix && household.seatsReserved > 1 ? ' & Family' : ''), '500 52px ' + SERIF, BROWN, 64);
 
       y += 14;
-      const badge = lastSubmission.yes.length + ' attending \u00B7 ' + lastSubmission.no.length + ' not attending';
+      const badge = lastSubmission.yes.length + ' attending \u00B7 ' + lastSubmission.no.length + ' not attending' + (lastSubmission.waiting.length ? ' \u00B7 ' + lastSubmission.waiting.length + ' awaiting' : '');
       ctx.font = '600 28px ' + SANS;
       const bw = ctx.measureText(badge).width + 56;
       if (draw) {
@@ -671,13 +692,14 @@
       }
       y += 58 + 20;
 
-      const mark = (x, cy, isYes) => {
+      const mark = (x, cy, kind) => {
         ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-        if (isYes) { ctx.strokeStyle = YES; ctx.beginPath(); ctx.moveTo(x - 11, cy); ctx.lineTo(x - 3, cy + 9); ctx.lineTo(x + 12, cy - 9); ctx.stroke(); }
+        if (kind === 'yes') { ctx.strokeStyle = YES; ctx.beginPath(); ctx.moveTo(x - 11, cy); ctx.lineTo(x - 3, cy + 9); ctx.lineTo(x + 12, cy - 9); ctx.stroke(); }
+        else if (kind === 'wait') { ctx.strokeStyle = MUTED; ctx.lineWidth = 4; ctx.setLineDash([5, 5]); ctx.beginPath(); ctx.arc(x, cy, 11, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
         else { ctx.strokeStyle = NO; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(x, cy, 11, 0, Math.PI * 2); ctx.stroke(); }
       };
       let firstSection = true;
-      const section = (label, names, isYes) => {
+      const section = (label, names, kind) => {
         if (!names.length) return;
         y += firstSection ? 36 : 70;
         firstSection = false;
@@ -687,12 +709,13 @@
           ctx.font = '500 36px ' + SANS;
           wrapText(ctx, n, MAXW - 64).forEach((l, i) => {
             y += 52;
-            if (draw) { if (i === 0) mark(PAD + 14, y - 13, isYes); ctx.fillStyle = TEXT; ctx.textAlign = 'left'; ctx.font = '500 36px ' + SANS; ctx.fillText(l, PAD + 52, y); }
+            if (draw) { if (i === 0) mark(PAD + 14, y - 13, kind); ctx.fillStyle = TEXT; ctx.textAlign = 'left'; ctx.font = '500 36px ' + SANS; ctx.fillText(l, PAD + 52, y); }
           });
         });
       };
-      section('Attending', lastSubmission.yes, true);
-      section('Not attending', lastSubmission.no, false);
+      section('Attending', lastSubmission.yes, 'yes');
+      section('Not attending', lastSubmission.no, 'no');
+      section('Awaiting reply', lastSubmission.waiting, 'wait');
 
       y += 50;
       if (draw) { ctx.strokeStyle = '#e6dccb'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke(); }

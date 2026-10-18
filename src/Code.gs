@@ -253,7 +253,8 @@ function getGroupMembers(id, label) {
 }
 
 /**
- * payload = { members: [{id, name, attending: true|false}], remarks }
+ * payload = { members: [{id, name, attending: true|false|null}], remarks }
+ * attending null = no answer yet: that guest stays Pending. The searcher's own answer is required (new or existing).
  * Anyone in the household can save answers for everyone in it. Only rows whose answer actually changed
  * get a new Responded At / Updated By, so "last updated by" stays truthful.
  * Open seats (blank Name in the sheet) are named from payload.members[].name.
@@ -274,15 +275,18 @@ function submitRsvp(id, payload) {
       if (!r) return;                                                   // ignore anything outside this household
       const name = r.Name || sanitizeText_(m.name, 80).replace(/;/g, ' '); // open seats can be named by the guest
       if (!name) return;
-      if (m.attending !== true && m.attending !== false) {
-        throw new Error('Please choose Attending or Not Attending for every guest.');
-      }
-      answers.push({ r: r, name: name, status: m.attending ? STATUS.ATTENDING : STATUS.DECLINED });
+      const answered = m.attending === true || m.attending === false;
+      if (!answered && m.attending != null) throw new Error('Invalid answer.');
+      // a guest left unanswered keeps the status they already have (Pending for a new one)
+      answers.push({
+        r: r, name: name, answered: answered,
+        status: answered ? (m.attending ? STATUS.ATTENDING : STATUS.DECLINED) : statusOf_(r)
+      });
     });
     if (!answers.length) throw new Error('Please enter at least one name.');
-    if (householdRows.some(r => r.Name && !answers.some(e => e.r === r))) {
-      throw new Error('Please answer for everyone in the invitation.');
-    }
+    // the person filling this in must have an answer: given now, or already recorded earlier
+    const selfAnswered = answers.some(e => e.r === searcher && e.answered) || statusOf_(searcher) !== STATUS.PENDING;
+    if (!selfAnswered) throw new Error('Please answer for yourself first.');
 
     const sheet = guestSheet_();
     const remarks = sanitizeText_(payload.remarks, 500);
@@ -291,18 +295,25 @@ function submitRsvp(id, payload) {
     let firstRowChanged = false;
 
     answers.forEach(e => {
-      const changed = statusOf_(e.r) !== e.status || e.r.Name !== e.name;
-      if (!changed) return;
+      const statusChanged = e.answered && statusOf_(e.r) !== e.status;
+      const nameChanged = e.r.Name !== e.name;
+      if (!statusChanged && !nameChanged) return;
       if (e.r === firstRow) firstRowChanged = true;
-      // Name, Status, Remarks, Responded At, Updated By (contiguous)
+      // Name, Status, Remarks, Responded At, Updated By (contiguous).
+      // Naming a seat without answering for it doesn't count as a response, so those two columns are kept.
       sheet.getRange(e.r.row, columnOf_('Name'), 1, 5).setValues([[
-        e.name, e.status, e.r === firstRow ? remarks : e.r.Remarks, now, searcher.Name
+        e.name, e.status, e.r === firstRow ? remarks : e.r.Remarks,
+        statusChanged ? now : e.r['Responded At'], statusChanged ? searcher.Name : e.r['Updated By']
       ]]);
     });
     if (!firstRowChanged && remarks !== String(firstRow.Remarks || '')) {
       sheet.getRange(firstRow.row, columnOf_('Remarks')).setValue(remarks);
     }
-    return { ok: true, attending: answers.filter(e => e.status === STATUS.ATTENDING).length };
+    return {
+      ok: true,
+      attending: answers.filter(e => e.answered && e.status === STATUS.ATTENDING).length,
+      waiting: answers.filter(e => !e.answered).length
+    };
   } finally {
     lock.releaseLock();
   }
