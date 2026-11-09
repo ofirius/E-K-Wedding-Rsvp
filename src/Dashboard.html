@@ -21,11 +21,28 @@
     .names div { padding: 1px 0; }
     .muted { color: #888; font-size: 12px; }
     .error { color: #b00020; }
+    .hidden { display: none; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tabs button { padding: 8px 16px; border: 1px solid #ccc; border-radius: 999px; background: #fff; font-size: 14px; cursor: pointer; }
+    .tabs button.active { background: #8a6f4d; color: #fff; border-color: #8a6f4d; }
+    .messages { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    .msg { background: #fff; border: 1px solid #e6dccb; border-radius: 14px; padding: 20px 22px; box-shadow: 0 1px 6px rgba(0,0,0,.06); display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+    .msg-text { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-size: 18px; line-height: 1.5; color: #4a3f38; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .msg-text::before { content: '\201C'; font-size: 34px; line-height: 0; vertical-align: -10px; margin-right: 4px; color: #c8b38a; }
+    .msg footer { border-top: 1px solid #eee; padding-top: 10px; display: flex; flex-direction: column; gap: 2px; }
+    .msg footer b { color: #5b4c43; }
+    .msg footer span { font-size: 12px; color: #888; }
   </style>
 </head>
 <body>
   <h1>RSVP Dashboard</h1>
+  <div class="tabs">
+    <button class="active" data-tab="overview">Overview</button>
+    <button id="messagesTab" data-tab="messages">Messages</button>
+  </div>
   <div id="error" class="error"></div>
+
+  <div id="overview">
   <div class="stats" id="stats"></div>
 
   <div class="toolbar">
@@ -44,6 +61,11 @@
       <tbody id="rows"></tbody>
     </table>
   </div>
+  </div>
+
+  <div id="messagesView" class="hidden">
+    <div id="messagesList" class="messages"></div>
+  </div>
 
   <script>
     const KEY = <?!= JSON.stringify(key).replace(/</g, '\\u003c') ?>;
@@ -59,6 +81,7 @@
 
     function draw() {
       const t = data.totals;
+      $('messagesTab').textContent = 'Messages (' + data.messageCount + ')';
       const cards = [
         [t.households, 'Households'], [t.invitees, 'Invited people'],
         [t.attending, 'Attending'], [t.declined, 'Not attending'], [t.pending, 'Awaiting response'],
@@ -89,6 +112,26 @@
       draw();
     });
     $('search').oninput = draw;
+
+    function showTab(name) {
+      document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+      $('overview').classList.toggle('hidden', name === 'messages');
+      $('messagesView').classList.toggle('hidden', name !== 'messages');
+      if (name === 'messages') loadMessages();
+    }
+    document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+    function loadMessages() {
+      $('messagesList').innerHTML = '<p class="muted">Loading…</p>';
+      google.script.run
+        .withSuccessHandler(list => {
+          $('messagesList').innerHTML = list.length
+            ? list.map(m => `<article class="msg"><p class="msg-text">${esc(m.message)}</p><footer><b>${esc(m.from)}</b><span>${esc(m.household)}${m.at ? ' \u00B7 ' + esc(m.at) : ''}</span></footer></article>`).join('')
+            : '<p class="muted">No messages yet.</p>';
+        })
+        .withFailureHandler(e => { $('messagesList').innerHTML = ''; $('error').textContent = e.message; })
+        .getMessages(KEY);
+    }
     load();
   </script>
 </body>

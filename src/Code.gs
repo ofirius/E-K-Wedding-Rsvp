@@ -3,7 +3,7 @@
  * Single deployment: Execute as: Me, Access: Anyone.
  *
  * Sheet "Guests" columns (ONE ROW PER PERSON):
- * ID | Household | Name | Status | Remarks | Responded At | Updated By | Groups
+ * ID | Household | Name | Status | Remarks | Responded At | Updated By | Groups | Remarks By
  *
  * - Household: any label shared by everyone in the same family/party, e.g. "Santos Family".
  *   Rows with the same Household are shown together, and anyone in it can update everyone's answer.
@@ -15,6 +15,7 @@
  * - Remarks: one household message, stored on the household's FIRST row.
  * - Responded At / Updated By: who last changed that person's answer, filled by the app.
  * - ID: filled automatically (leave blank).
+ * - Remarks By: who last wrote or changed the household's remarks (filled by the app). Add this header in column I.
  * - Groups (optional): one or more labels separated by ";", e.g. "HS Friends; Work". A group is a VIEW-ONLY
  *   circle: anyone who lists a label can see the name and status of everyone else who lists it, but can only
  *   change answers inside their own Household. Add the "Groups" header in column H if your sheet doesn't have it.
@@ -22,7 +23,7 @@
 
 const GUEST_SHEET = 'Guests';
 const LEGACY_SHEET_NAME = 'Guests (old layout)';
-const GUEST_COLUMNS = ['ID', 'Household', 'Name', 'Status', 'Remarks', 'Responded At', 'Updated By', 'Groups'];
+const GUEST_COLUMNS = ['ID', 'Household', 'Name', 'Status', 'Remarks', 'Responded At', 'Updated By', 'Groups', 'Remarks By'];
 const STATUS = { PENDING: 'Pending', ATTENDING: 'Attending', DECLINED: 'Declined' };
 const MAX_SEARCH_RESULTS = 5;
 const MIN_QUERY_LENGTH = 3;
@@ -106,9 +107,9 @@ function migrateToPersonRows() {
       const status = att.includes(k) ? STATUS.ATTENDING : notAtt.includes(k) ? STATUS.DECLINED : STATUS.PENDING;
       const answered = status !== STATUS.PENDING;
       out.push([randomId_(), label, nm, status, i === 0 ? String(o['Remarks'] || '') : '',
-                answered ? o['Responded At'] : '', answered ? primary : '', '']);
+                answered ? o['Responded At'] : '', answered ? primary : '', '', '']);
     });
-    for (let i = names.length; i < reserved; i++) out.push([randomId_(), label, '', '', '', '', '', '']); // open seats
+    for (let i = names.length; i < reserved; i++) out.push([randomId_(), label, '', '', '', '', '', '', '']); // open seats
   });
 
   let backupName = LEGACY_SHEET_NAME;
@@ -309,6 +310,9 @@ function submitRsvp(id, payload) {
     if (!firstRowChanged && remarks !== String(firstRow.Remarks || '')) {
       sheet.getRange(firstRow.row, columnOf_('Remarks')).setValue(remarks);
     }
+    if (remarks !== String(firstRow.Remarks || '')) {
+      sheet.getRange(firstRow.row, columnOf_('Remarks By')).setValue(remarks ? searcher.Name : '');
+    }
     return {
       ok: true,
       attending: answers.filter(e => e.answered && e.status === STATUS.ATTENDING).length,
@@ -321,12 +325,17 @@ function submitRsvp(id, payload) {
 
 /* ---------- Dashboard API ---------- */
 
-function getDashboardData(key) {
+function assertDashboardKey_(key) {
   const expected = PropertiesService.getScriptProperties().getProperty('DASHBOARD_KEY');
   if (!key || key !== expected) throw new Error('Unauthorized.');
+}
+
+function getDashboardData(key) {
+  assertDashboardKey_(key);
 
   const rowsByHousehold = new Map();
-  readGuestRows_().forEach(r => {
+  const allRows = readGuestRows_();
+  allRows.forEach(r => {
     const k = householdKey_(r);
     if (!rowsByHousehold.has(k)) rowsByHousehold.set(k, []);
     rowsByHousehold.get(k).push(r);
@@ -373,7 +382,45 @@ function getDashboardData(key) {
     });
   });
 
-  return { totals: totals, households: households };
+  return { totals: totals, households: households, messageCount: collectMessages_(allRows).length };
+}
+
+/** Wedding messages for the dashboard's Messages tab, newest response first. */
+function getMessages(key) {
+  assertDashboardKey_(key);
+  return collectMessages_(readGuestRows_());
+}
+
+/** One message per household whose remarks box has text. The author is whoever last changed that text. */
+function collectMessages_(rows) {
+  const byHousehold = new Map();
+  rows.forEach(r => {
+    const k = householdKey_(r);
+    if (!byHousehold.has(k)) byHousehold.set(k, []);
+    byHousehold.get(k).push(r);
+  });
+
+  const messages = [];
+  byHousehold.forEach(group => {
+    const first = group[0];                         // remarks live on the household's first row
+    const text = String(first.Remarks || '').trim();
+    const named = group.filter(r => r.Name);
+    if (!text || !named.length) return;
+
+    let newest = null;
+    group.forEach(r => {
+      const d = r['Responded At'] ? new Date(r['Responded At']) : null;
+      if (d && !isNaN(d) && (!newest || d > newest)) newest = d;
+    });
+    messages.push({
+      from: String(first['Remarks By'] || first['Updated By'] || named[0].Name),   // older remarks have no author, fall back
+      household: first.Household || named[0].Name,
+      message: text,
+      sort: newest ? +newest : 0,
+      at: newest ? Utilities.formatDate(newest, Session.getScriptTimeZone(), 'MMM d, h:mm a') : ''
+    });
+  });
+  return messages.sort((a, b) => b.sort - a.sort).map(m => ({ from: m.from, household: m.household, message: m.message, at: m.at }));
 }
 
 /* ---------- Helpers ---------- */
