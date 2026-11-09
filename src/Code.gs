@@ -42,9 +42,15 @@ function doGet(e) {
   }
   if (page === 'ics') return buildIcsResponse_();
 
-  return HtmlService.createHtmlOutputFromFile('Index')
+  if (pastDeadline()) {
+	return HtmlService.createHtmlOutputFromFile('PastDeadline')
     .setTitle('Wedding RSVP')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  } else {
+	return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('Wedding RSVP')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  }
 }
 
 /* ---------- One-time setup (run manually from the editor) ---------- */
@@ -507,4 +513,17 @@ function enforceSearchLimit_() {
   const n = Number(cache.get(key) || 0) + 1;
   cache.put(key, String(n), 90);
   if (n > MAX_SEARCHES_PER_MINUTE) throw new Error('Lots of people are searching right now. Please try again in a minute.');
+}
+
+function pastDeadline() {
+  var currentDate = new Date();
+  
+  var deadline = new Date(2026, 10, 9); 
+  
+  // 3. Compare using timestamps in milliseconds
+  if (currentDate.getTime() > deadline.getTime()) {
+    return true
+  } else {
+    return false
+  }
 }
